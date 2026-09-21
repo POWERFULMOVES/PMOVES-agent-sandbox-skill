@@ -1,6 +1,6 @@
 ---
 name: Agent Sandboxes
-description: Operate E2B agent sandboxes using the CLI. Use when user needs to run code in isolation, test packages, execute commands safely, or work with binary files in a sandbox environment. Keywords: sandbox, e2b, isolated environment, run code, test code, safe execution.
+description: Use when running code in isolation, testing packages, executing commands safely, or working with binary files in a sandbox — on hosted e2b.dev or a self-hosted E2B cluster. Keywords: sandbox, e2b, self-hosted, on-prem, E2B_DOMAIN, isolated environment, run code, test code, safe execution.
 ---
 
 # Agent Sandboxes
@@ -9,34 +9,66 @@ This skill provides access to E2B sandboxes through a streamlined CLI for safe c
 
 ## Variables
 
-- **E2B_API_KEY**: The environment variable containing the E2B API key (stored in the environment file)
+- **E2B_API_KEY**: API key for **whichever cluster you are targeting** (stored in the environment file)
+- **E2B_DOMAIN**: Self-hosted cluster domain. Unset = hosted e2b.app.
+  **Bare domain — no scheme, no trailing slash** (`e2b.corp.com`, not `https://e2b.corp.com/`).
+  It is string-concatenated into `<port>-<sandbox_id>.<domain>`, so a scheme corrupts the host
+- **E2B_API_URL**: Direct API URL, for a bare-metal/local node instead of a domain
+- **E2B_SANDBOX_URL**: Overrides the computed sandbox URL. Note the bare-metal runbook also
+  lists `E2B_ENVD_API_URL`, which the SDK does **not** read — set `E2B_SANDBOX_URL` instead
 - **SANDBOX_CLI_PATH**: `.claude/skills/agent-sandboxes/sandbox_cli/`
-- **ENVIRONMENT_FILE_PATH**: `../../../../.env`
+- **ENVIRONMENT_FILE_PATH**: `../../../../.env` — resolved **relative to SANDBOX_CLI_PATH**, landing on the repo root
 - **TIMEOUT_DURATION_IN_SECONDS**: `43200` (12 hours)
 
 ## Prerequisites
 
-Before using sandbox operations, **validate the environment**:
+### Step 0: Determine WHICH CLUSTER you are targeting — do this first
 
-1. **Check for E2B_API_KEY**:
-   ```bash
-   # Verify the API key is set
-   grep "E2B_API_KEY" `ENVIRONMENT_FILE_PATH`
-   ```
+**This is the most important check in this skill, and it fails silently if you skip it.**
 
-   If missing, instruct the user:
-   ```
-   Error: E2B_API_KEY not found in .env file
+The CLI takes no cluster argument. It calls the E2B SDK bare, and the SDK resolves its
+target from environment variables alone. If those are unset, **it connects to the hosted
+e2b.dev service and bills whatever key is in `.env`** — it does not error. A sandbox will
+be created, commands will run, and everything will look like it worked. On the wrong
+cluster.
 
-   Please add your E2B API key to the .env file in the project root:
-   echo "E2B_API_KEY=your_api_key_here" >> .env
+Read the environment before running anything:
 
-   Get your API key from: https://e2b.dev/docs
-   ```
+```bash
+grep -E "E2B_DOMAIN|E2B_API_URL|E2B_API_KEY" `ENVIRONMENT_FILE_PATH`
+```
 
-2. **Verify CLI is available**:
-   The sandbox CLI is located at `SANDBOX_CLI_PATH`
-   The `.env` file is automatically loaded from the project root.
+Resolve the mode from what you find:
+
+| Found | Mode | Sandboxes run on |
+|-------|------|------------------|
+| `E2B_DOMAIN=<domain>` | **Self-hosted cluster** | your Nomad/Firecracker cluster |
+| `E2B_API_URL=<url>` (no domain) | **Bare-metal / local node** | that single node |
+| Neither, only `E2B_API_KEY` | **Hosted e2b.dev** | e2b.dev, billed to that key |
+
+**If the user has told you the team is self-hosted and you find neither variable, STOP.**
+Do not run `sbx init` to "see what happens" — that is the silent-hosted-billing path. Say
+the cluster is not configured and ask for the domain or API URL.
+
+These are read by the SDK's `ConnectionConfig` directly from the environment, so **no CLI
+flag and no code change is needed** — setting them in `.env` is the entire mechanism.
+
+### Step 1: Confirm the API key matches that cluster
+
+An `E2B_API_KEY` is only valid for the cluster that issued it. A hosted key will not
+authenticate against your own cluster and vice versa.
+
+| Mode | Where the key comes from |
+|------|--------------------------|
+| Hosted | https://e2b.dev/docs |
+| Self-hosted cluster | `make prep-cluster` (creates the initial user/team), or `make seed-db` for more |
+| Bare-metal / local | `packages/local-dev/seed-local-database.go` prints a key and access token |
+
+If missing, tell the user which of the three applies rather than defaulting to the e2b.dev link.
+
+### Step 2: Verify CLI is available
+
+The sandbox CLI is located at `SANDBOX_CLI_PATH`. The `.env` file is loaded automatically.
 
 ## Instructions
 
@@ -55,15 +87,26 @@ Before using sandbox operations, **validate the environment**:
 
 Pre-built templates with different resource levels. Use `--template` flag with `sbx init`:
 
-| Template | vCPU | RAM | Cost | Best For |
-|----------|------|-----|------|----------|
+| Template | vCPU | RAM | Hosted cost | Best For |
+|----------|------|-----|-------------|----------|
 | `fullstack-vue-fastapi-node22` | 2 | 2GB | $0.13/hr | Simple apps (default) |
 | `fullstack-vue-fastapi-node22-lite` | 2 | 4GB | $0.15/hr | Browser tests |
 | `fullstack-vue-fastapi-node22-standard` | 4 | 4GB | $0.27/hr | Parallel builds |
 | `fullstack-vue-fastapi-node22-heavy` | 4 | 8GB | $0.33/hr | Multi-browser |
 | `fullstack-vue-fastapi-node22-max` | 8 | 8GB | $0.44/hr | Fastest |
 
-Build new templates: `uv run build_template.py --tier <tier>` or `--list-tiers` to see options.
+**Templates are per-cluster, and so is that cost column.**
+
+- **Hosted**: these exist already and the $/hr applies.
+- **Self-hosted**: the cost column is meaningless — you are paying for your own nodes. More
+  importantly, **these templates do not exist on your cluster until you build them there.**
+  Passing `--template fullstack-vue-fastapi-node22` to a cluster that has not built it will
+  fail. A fresh cluster has only the `base` template created by `make prep-cluster`
+  (or `make local-build-base-template` on bare metal).
+- Build them on your own cluster with `uv run build_template.py --tier <tier>`
+  (`--list-tiers` to see options), or omit `--template` and take `base`.
+
+The vCPU/RAM columns still describe what each tier asks for, on any cluster.
 
 ### When to Use Sandboxes
 
@@ -296,13 +339,13 @@ uv run sbx exec <sandbox_id> "/home/user/.local/bin/uv pip install --system requ
 
 ```bash
 # For Python/Flask
-uv run sbx exec <sandbox_id> "python -m http.server 5173" --background --cwd /home/user/project
+uv run sbx exec <sandbox_id> "python3 -m http.server 5173 --bind 0.0.0.0" --background --cwd /home/user/project
 
 # For Node/React (Vite)
-uv run sbx exec <sandbox_id> "npm run dev -- --port 5173" --background --cwd /home/user/project
+uv run sbx exec <sandbox_id> "npm run dev -- --port 5173 --host 0.0.0.0" --background --cwd /home/user/project
 
 # For static HTML/CSS/JS
-uv run sbx exec <sandbox_id> "python -m http.server 5173" --background --cwd /home/user/dist
+uv run sbx exec <sandbox_id> "python3 -m http.server 5173 --bind 0.0.0.0" --background --cwd /home/user/dist
 
 # For a custom Python server
 uv run sbx files write <sandbox_id> /home/user/server.py "from flask import Flask; app = Flask(__name__); app.run(host='0.0.0.0', port=5173)"
@@ -322,12 +365,33 @@ uv run sbx exec <sandbox_id> "python /home/user/server.py" --background
 uv run sbx sandbox get-host <sandbox_id> --port 5173
 ```
 
-This command returns the authoritative public URL (format: `https://5173-<sandbox_id>.e2b.app`).
+The host it returns is derived from the cluster you are pointed at, so the domain differs
+per mode:
+
+| Mode | Shape of what `get-host` returns |
+|------|----------------------------------|
+| Hosted | `5173-<sandbox_id>.e2b.app` |
+| Self-hosted cluster | `5173-<sandbox_id>.<E2B_DOMAIN>` |
+| Bare-metal / local | a host on that node — override with `E2B_SANDBOX_URL` if set |
+
+The default is `<port>-<sandbox_id>.<domain>`; `E2B_SANDBOX_URL` overrides it wholesale.
+
+**`get-host` returns a BARE HOST with no scheme** — `5173-sbx_abc.example.com`, not
+`https://5173-sbx_abc.example.com`. You must prefix `https://` yourself when handing it to
+`curl` or to the user. (With `E2B_DEBUG=true` it returns `localhost:<port>` instead, which
+is why debug mode is not a self-hosting mechanism.)
+
+These are shapes, to help you **recognise** the output — not templates to fill in. Use the
+exact string returned.
+
+**`.e2b.app` coming back when you expected your own domain is a misconfiguration signal,
+not a working URL.** It means `E2B_DOMAIN` never reached the SDK and the sandbox was
+created on hosted e2b.dev. Stop and re-check Step 0 rather than handing the user that URL.
 
 **Example**:
 ```bash
 uv run sbx sandbox get-host sbx_abc123def456 --port 5173
-# Output: https://5173-sbx_abc123def456.e2b.app
+# Output: <the authoritative URL — capture it exactly as printed>
 # YOU capture and remember this URL in your context
 ```
 
@@ -341,11 +405,11 @@ uv run sbx sandbox get-host sbx_abc123def456 --port 5173
 
 Get the URL using `get-host` and test it:
 ```bash
-# Get the URL (captures output: https://5173-<sandbox_id>.e2b.app)
+# Get the URL — whatever this prints is authoritative for your cluster
 uv run sbx sandbox get-host <sandbox_id> --port 5173
 
-# YOU remember the URL in your context, then test it
-curl https://5173-<sandbox_id>.e2b.app
+# YOU remember the URL in your context, then test that exact string
+curl "<the URL get-host printed>"
 ```
 
 **Note**: Capture the URL from get-host output and remember it in your context. Use the exact URL in subsequent commands.
@@ -397,7 +461,7 @@ If you built a frontend or web application, use `get-host` to retrieve the publi
 uv run sbx sandbox get-host <sandbox_id> --port 5173
 ```
 
-This returns the actual URL (e.g., `https://5173-<sandbox_id>.e2b.app`).
+This returns the actual URL for the cluster you are pointed at.
 
 **Do NOT construct the URL manually** - always use the `get-host` command.
 
@@ -484,6 +548,21 @@ For complete command reference and advanced usage, see:
 - Check `.env` file exists in project root
 - Verify key is set: `grep E2B_API_KEY .env`
 - Add key if missing: `echo "E2B_API_KEY=key" >> .env`
+- **Get the key from the cluster you are targeting** — see Prerequisites Step 1. A hosted
+  e2b.dev key will not authenticate against a self-hosted cluster.
+
+**"Unauthorized" / 401 against a self-hosted cluster**:
+- Almost always a key issued by a *different* cluster. Re-check Step 1.
+- Confirm `E2B_DOMAIN` / `E2B_API_URL` and the key came from the same deployment.
+
+**"Template not found" on a self-hosted cluster**:
+- The `fullstack-*` tiers are not present until built there. Omit `--template` to use
+  `base`, or build the tier on your cluster. See Template Tiers.
+
+**Commands succeed but the sandbox isn't on our cluster**:
+- Classic silent-hosted fallthrough. `get-host` returning `.e2b.app` when you expected your
+  own domain confirms it.
+- `E2B_DOMAIN` was unset or not visible to the process. Re-run Step 0.
 
 **"Command not found: sbx"**:
 - Ensure you're in the sandbox_cli directory
